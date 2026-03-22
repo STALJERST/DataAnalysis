@@ -102,8 +102,9 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
             // --- Права панель ---
             SetWindowPos(m_hPidLabel, NULL, mainX, 5, mainWidth, 20, SWP_NOZORDER);
-            SetWindowPos(m_hScanEdit, NULL, mainX, 30, 100, 25, SWP_NOZORDER);
-            SetWindowPos(m_hScanBtn, NULL, mainX + 110, 30, 150, 25, SWP_NOZORDER);
+            SetWindowPos(m_hScanEdit, NULL, mainX, 30, 80, 25, SWP_NOZORDER);
+            SetWindowPos(m_hScanBtn, NULL, mainX + 90, 30, 140, 25, SWP_NOZORDER);
+            SetWindowPos(m_hNextScanBtn, NULL, mainX + 240, 30, 120, 25, SWP_NOZORDER); // Нова кнопка
 
             // Два списки ділять висоту навпіл
             SetWindowPos(m_hResultsList, NULL, mainX, 65, mainWidth, listHeight, SWP_NOZORDER);
@@ -311,7 +312,40 @@ int main() {
     if (outFile.is_open()) {
         outFile << dummySourceCode;
         outFile.close();
-    } else {
+    }
+    else if (wmId == IDC_NEXT_SCAN_BUTTON) {
+        // 1. Перевірки
+        if (m_selectedPID == 0) {
+            MessageBoxW(m_hwnd, L"Процес не вибрано!", L"Увага", MB_ICONWARNING);
+            return 0;
+        }
+        if (m_scanResults.empty()) {
+            MessageBoxW(m_hwnd, L"Спочатку зробіть 'Перше сканування'!", L"Увага", MB_ICONWARNING);
+            return 0;
+        }
+
+        // 2. Читаємо нове число
+        wchar_t buf[32];
+        GetWindowTextW(m_hScanEdit, buf, 32);
+        int val = _wtoi(buf);
+
+        SetCursor(LoadCursor(NULL, IDC_WAIT));
+
+        // 3. Викликаємо метод відсіювання і ОНОВЛЮЄМО наш головний масив результатів
+        m_scanResults = NextScanMemoryForInt(m_selectedPID, val);
+
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
+
+        // 4. Оновлюємо візуальний список
+        ListView_SetItemCount(m_hResultsList, m_scanResults.size());
+        InvalidateRect(m_hResultsList, NULL, TRUE);
+
+        // Додатково: якщо залишилася тільки одна адреса - можемо привітати користувача
+        if (m_scanResults.size() == 1) {
+            MessageBoxW(m_hwnd, L"Бінго! Ви знайшли унікальну адресу!", L"Успіх", MB_OK | MB_ICONINFORMATION);
+        }
+    }
+                else {
         MessageBoxW(m_hwnd, L"Не вдалося створити файл GeneratedDummy.cpp", L"Помилка", MB_ICONERROR);
         return 0;
     }
@@ -693,4 +727,34 @@ LRESULT CALLBACK RenderWindow::MemoryDumpProc(HWND hwnd, UINT uMsg, WPARAM wPara
         }
     }
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+std::vector<uintptr_t> RenderWindow::NextScanMemoryForInt(DWORD pid, int targetValue) {
+    std::vector<uintptr_t> filteredAddresses;
+
+    // Відкриваємо процес для читання
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, pid);
+    if (!hProcess) {
+        MessageBoxW(m_hwnd, L"Не вдалося відкрити процес для відсіювання!", L"Помилка", MB_ICONERROR);
+        return filteredAddresses;
+    }
+
+    int currentValue = 0;
+    SIZE_T bytesRead = 0;
+
+    // Пробігаємося ТІЛЬКИ по вже збережених результатах попереднього пошуку
+    for (uintptr_t address : m_scanResults) {
+
+        // Читаємо значення за цією конкретною адресою
+        if (ReadProcessMemory(hProcess, (LPCVOID)address, &currentValue, sizeof(int), &bytesRead)) {
+
+            // Якщо значення збігається з новим - залишаємо адресу!
+            if (currentValue == targetValue) {
+                filteredAddresses.push_back(address);
+            }
+        }
+    }
+
+    CloseHandle(hProcess);
+    return filteredAddresses;
 }
