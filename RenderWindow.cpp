@@ -103,8 +103,9 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
             // --- Права панель ---
             SetWindowPos(m_hPidLabel, NULL, mainX, 5, mainWidth, 20, SWP_NOZORDER);
             SetWindowPos(m_hScanEdit, NULL, mainX, 30, 80, 25, SWP_NOZORDER);
-            SetWindowPos(m_hScanBtn, NULL, mainX + 90, 30, 140, 25, SWP_NOZORDER);
-            SetWindowPos(m_hNextScanBtn, NULL, mainX + 240, 30, 120, 25, SWP_NOZORDER); // Нова кнопка
+            SetWindowPos(m_hTypeCombo, NULL, mainX + 90, 30, 120, 25, SWP_NOZORDER);
+            SetWindowPos(m_hScanBtn, NULL, mainX + 220, 30, 140, 25, SWP_NOZORDER);
+            SetWindowPos(m_hNextScanBtn, NULL, mainX + 370, 30, 120, 25, SWP_NOZORDER);
 
             // Два списки ділять висоту навпіл
             SetWindowPos(m_hResultsList, NULL, mainX, 65, mainWidth, listHeight, SWP_NOZORDER);
@@ -150,7 +151,34 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
                             CloseHandle(hProc);
                             swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%d", currentVal);
                         }
+                    } else if (col == 1) {
+                        HANDLE hProc = OpenProcess(PROCESS_VM_READ, FALSE, m_selectedPID);
+                        if (hProc) {
+                            // ЧИТАЄМО І ВИВОДИМО ЗАЛЕЖНО ВІД ПОТОЧНОГО ТИПУ
+                            switch (m_currentScanType) {
+                                case TYPE_INT: {
+                                    int val = 0;
+                                    ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(int), NULL);
+                                    swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%d", val);
+                                    break;
+                                }
+                                case TYPE_FLOAT: {
+                                    float val = 0.0f;
+                                    ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(float), NULL);
+                                    swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%.2f", val); // %.2f - дві цифри після коми
+                                    break;
+                                }
+                                case TYPE_BYTE: {
+                                    BYTE val = 0;
+                                    ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(BYTE), NULL);
+                                    swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%u", val); // %u - беззнакове ціле
+                                    break;
+                                }
+                            }
+                            CloseHandle(hProc);
+                        }
                     }
+
                 }
             }
 
@@ -253,27 +281,42 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
                 std::wstring msg = L"Вибрано ЗАПИС для PID: " + std::to_wstring(m_selectedPID);
                 MessageBoxW(m_hwnd, msg.c_str(), L"Дія контекстного меню", MB_OK | MB_ICONINFORMATION);
             }
-            else if (wmId == IDC_SCAN_BUTTON) {
-                // Перевіряємо, чи ми "прицілилися" на якийсь процес
+            else if (wmId == IDC_SCAN_BUTTON || wmId == IDC_NEXT_SCAN_BUTTON) {
                 if (m_selectedPID == 0) {
-                    MessageBoxW(m_hwnd, L"Спочатку виберіть процес зі списку зліва (ПКМ) або запустіть манекен!", L"Увага", MB_ICONWARNING);
-                } else {
-                    // Читаємо число з поля вводу
-                    wchar_t buf[32];
-                    GetWindowTextW(m_hScanEdit, buf, 32);
-                    int val = _wtoi(buf);
-
-                    SetCursor(LoadCursor(NULL, IDC_WAIT));
-
-                    // ВИКЛИКАЄМО ПОШУК (переконайтеся, що функція ScanMemoryForInt є у вашому коді)
-                    m_scanResults = ScanMemoryForInt(m_selectedPID, val);
-
-                    SetCursor(LoadCursor(NULL, IDC_ARROW));
-
-                    // Оновлюємо список результатів (працюватиме через ваш WM_NOTIFY)
-                    ListView_SetItemCount(m_hResultsList, m_scanResults.size());
-                    InvalidateRect(m_hResultsList, NULL, TRUE);
+                    MessageBoxW(m_hwnd, L"Спочатку виберіть процес!", L"Увага", MB_ICONWARNING);
+                    return 0;
                 }
+
+                wchar_t buf[32];
+                GetWindowTextW(m_hScanEdit, buf, 32);
+
+                // Дізнаємось вибраний тип
+                int selectedType = SendMessageW(m_hTypeCombo, CB_GETCURSEL, 0, 0);
+                m_currentScanType = (ScanDataType)selectedType; // Запам'ятовуємо
+
+                SetCursor(LoadCursor(NULL, IDC_WAIT));
+
+                // Робимо магію залежно від типу
+                if (m_currentScanType == TYPE_INT) {
+                    int val = _wtoi(buf);
+                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = ScanMemory<int>(m_selectedPID, val);
+                    else m_scanResults = NextScanMemory<int>(m_selectedPID, val);
+                }
+                else if (m_currentScanType == TYPE_FLOAT) {
+                    float val = (float)_wtof(buf); // Читаємо як float
+                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = ScanMemory<float>(m_selectedPID, val);
+                    else m_scanResults = NextScanMemory<float>(m_selectedPID, val);
+                }
+                else if (m_currentScanType == TYPE_BYTE) {
+                    BYTE val = (BYTE)_wtoi(buf); // 1 байт - це число від 0 до 255
+                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = ScanMemory<BYTE>(m_selectedPID, val);
+                    else m_scanResults = NextScanMemory<BYTE>(m_selectedPID, val);
+                }
+
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+
+                ListView_SetItemCount(m_hResultsList, m_scanResults.size());
+                InvalidateRect(m_hResultsList, NULL, TRUE);
             }
 
             else if (wmId == IDC_BTN_LAUNCH_TEST) {
@@ -312,38 +355,6 @@ int main() {
     if (outFile.is_open()) {
         outFile << dummySourceCode;
         outFile.close();
-    }
-    else if (wmId == IDC_NEXT_SCAN_BUTTON) {
-        // 1. Перевірки
-        if (m_selectedPID == 0) {
-            MessageBoxW(m_hwnd, L"Процес не вибрано!", L"Увага", MB_ICONWARNING);
-            return 0;
-        }
-        if (m_scanResults.empty()) {
-            MessageBoxW(m_hwnd, L"Спочатку зробіть 'Перше сканування'!", L"Увага", MB_ICONWARNING);
-            return 0;
-        }
-
-        // 2. Читаємо нове число
-        wchar_t buf[32];
-        GetWindowTextW(m_hScanEdit, buf, 32);
-        int val = _wtoi(buf);
-
-        SetCursor(LoadCursor(NULL, IDC_WAIT));
-
-        // 3. Викликаємо метод відсіювання і ОНОВЛЮЄМО наш головний масив результатів
-        m_scanResults = NextScanMemoryForInt(m_selectedPID, val);
-
-        SetCursor(LoadCursor(NULL, IDC_ARROW));
-
-        // 4. Оновлюємо візуальний список
-        ListView_SetItemCount(m_hResultsList, m_scanResults.size());
-        InvalidateRect(m_hResultsList, NULL, TRUE);
-
-        // Додатково: якщо залишилася тільки одна адреса - можемо привітати користувача
-        if (m_scanResults.size() == 1) {
-            MessageBoxW(m_hwnd, L"Бінго! Ви знайшли унікальну адресу!", L"Успіх", MB_OK | MB_ICONINFORMATION);
-        }
     }
                 else {
         MessageBoxW(m_hwnd, L"Не вдалося створити файл GeneratedDummy.cpp", L"Помилка", MB_ICONERROR);
@@ -492,6 +503,16 @@ void RenderWindow::SetupControls() {
     lvcSaved.cx = 100; lvcSaved.pszText = (LPWSTR)L"Поточне Значення";
     SendMessageW(m_hSavedList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvcSaved);
 
+
+    m_hTypeCombo = CreateWindowExW(0, WC_COMBOBOXW, L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        0, 0, 0, 150, m_hwnd, (HMENU)IDC_TYPE_COMBO, NULL, NULL);
+
+    SendMessageW(m_hTypeCombo, CB_ADDSTRING, 0, (LPARAM)L"4 Байти (Int)");
+    SendMessageW(m_hTypeCombo, CB_ADDSTRING, 0, (LPARAM)L"Float (Дробове)");
+    SendMessageW(m_hTypeCombo, CB_ADDSTRING, 0, (LPARAM)L"1 Байт (Byte)");
+    SendMessageW(m_hTypeCombo, CB_SETCURSEL, 0, 0); // За замовчуванням - Int
+
 }
 
 
@@ -548,65 +569,7 @@ void RenderWindow::UpdatePidLabel() {
     }
 }
 
-std::vector<uintptr_t> RenderWindow::ScanMemoryForInt(DWORD pid, int targetValue) {
-    std::vector<uintptr_t> foundAddresses;
 
-    // Відкриваємо процес з правами на читання та запит інформації (обов'язково для VirtualQueryEx)
-    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (!hProcess) {
-        MessageBoxW(m_hwnd, L"Не вдалося відкрити процес для сканування! Можливо, потрібні права Адміністратора.", L"Помилка", MB_ICONERROR);
-        return foundAddresses;
-    }
-
-    // Отримуємо мінімальну та максимальну адресу для пошуку в ОС
-    SYSTEM_INFO sysInfo;
-    GetSystemInfo(&sysInfo);
-    uintptr_t currentAddr = (uintptr_t)sysInfo.lpMinimumApplicationAddress;
-    uintptr_t maxAddr = (uintptr_t)sysInfo.lpMaximumApplicationAddress;
-
-    MEMORY_BASIC_INFORMATION mbi;
-
-    // Проходимося по всіх блоках пам'яті процесу
-    while (currentAddr < maxAddr) {
-        // Запитуємо інформацію про поточний блок пам'яті
-        if (VirtualQueryEx(hProcess, (LPCVOID)currentAddr, &mbi, sizeof(mbi)) == 0) {
-            break; // Якщо помилка або кінець доступної пам'яті - виходимо з циклу
-        }
-
-        // Нас цікавить лише виділена пам'ять (MEM_COMMIT), в яку програма може писати (PAGE_READWRITE)
-        if (mbi.State == MEM_COMMIT &&
-           (mbi.Protect == PAGE_READWRITE || mbi.Protect == PAGE_EXECUTE_READWRITE)) {
-
-            SIZE_T regionSize = mbi.RegionSize;
-            std::vector<BYTE> buffer(regionSize); // Локальний буфер для копії блоку пам'яті
-            SIZE_T bytesRead = 0;
-
-            // Читаємо весь блок пам'яті одним швидким викликом
-            if (ReadProcessMemory(hProcess, mbi.BaseAddress, buffer.data(), regionSize, &bytesRead)) {
-
-                // Шукаємо наше число у завантаженому масиві
-                // Віднімаємо sizeof(int), щоб не вийти за межі при читанні останніх байтів
-                for (SIZE_T i = 0; i <= bytesRead - sizeof(int); i++) {
-
-                    // Інтерпретуємо 4 байти за поточним зміщенням як тип 'int'
-                    int val = *(int*)&buffer[i];
-
-                    if (val == targetValue) {
-                        // Якщо знайшли збіг - вираховуємо реальну адресу у пам'яті
-                        uintptr_t realAddress = (uintptr_t)mbi.BaseAddress + i;
-                        foundAddresses.push_back(realAddress);
-                    }
-                }
-            }
-        }
-
-        // Переходимо до наступного блоку пам'яті
-        currentAddr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-    }
-
-    CloseHandle(hProcess);
-    return foundAddresses; // Повертаємо список знайдених адрес
-}
 
 void RenderWindow::ShowMemoryDump(uintptr_t targetAddress) {
     if (m_selectedPID == 0) return;
@@ -729,32 +692,54 @@ LRESULT CALLBACK RenderWindow::MemoryDumpProc(HWND hwnd, UINT uMsg, WPARAM wPara
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
-std::vector<uintptr_t> RenderWindow::NextScanMemoryForInt(DWORD pid, int targetValue) {
-    std::vector<uintptr_t> filteredAddresses;
 
-    // Відкриваємо процес для читання
-    HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, pid);
-    if (!hProcess) {
-        MessageBoxW(m_hwnd, L"Не вдалося відкрити процес для відсіювання!", L"Помилка", MB_ICONERROR);
-        return filteredAddresses;
-    }
+uintptr_t RenderWindow::PatternScan(DWORD pid, const char* pattern, const char* mask) {
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProcess) return 0;
 
-    int currentValue = 0;
-    SIZE_T bytesRead = 0;
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    uintptr_t currentAddr = (uintptr_t)sysInfo.lpMinimumApplicationAddress;
+    uintptr_t maxAddr = (uintptr_t)sysInfo.lpMaximumApplicationAddress;
+    MEMORY_BASIC_INFORMATION mbi;
 
-    // Пробігаємося ТІЛЬКИ по вже збережених результатах попереднього пошуку
-    for (uintptr_t address : m_scanResults) {
+    size_t patternLen = strlen(mask);
 
-        // Читаємо значення за цією конкретною адресою
-        if (ReadProcessMemory(hProcess, (LPCVOID)address, &currentValue, sizeof(int), &bytesRead)) {
+    // Проходимося по всіх блоках пам'яті
+    while (currentAddr < maxAddr) {
+        if (VirtualQueryEx(hProcess, (LPCVOID)currentAddr, &mbi, sizeof(mbi)) == 0) break;
 
-            // Якщо значення збігається з новим - залишаємо адресу!
-            if (currentValue == targetValue) {
-                filteredAddresses.push_back(address);
+        // Шукаємо ТІЛЬКИ в пам'яті, де лежить ВИКОНУВАНИЙ КОД (PAGE_EXECUTE_READ або PAGE_EXECUTE_READWRITE)
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_EXECUTE_READ || mbi.Protect & PAGE_EXECUTE_READWRITE)) {
+
+            std::vector<BYTE> buffer(mbi.RegionSize);
+            SIZE_T bytesRead = 0;
+
+            if (ReadProcessMemory(hProcess, mbi.BaseAddress, buffer.data(), mbi.RegionSize, &bytesRead)) {
+
+                // Проходимося по буферу і намагаємося накласти нашу маску
+                for (SIZE_T i = 0; i < bytesRead - patternLen; i++) {
+                    bool found = true;
+
+                    for (SIZE_T j = 0; j < patternLen; j++) {
+                        // Якщо маска 'x' і байти не збігаються - це не наш код
+                        if (mask[j] == 'x' && buffer[i + j] != (BYTE)pattern[j]) {
+                            found = false;
+                            break;
+                        }
+
+                    }
+
+                    if (found) {
+                        CloseHandle(hProcess);
+                        return (uintptr_t)mbi.BaseAddress + i; // Повертаємо адресу в пам'яті
+                    }
+                }
             }
         }
+        currentAddr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
     }
 
     CloseHandle(hProcess);
-    return filteredAddresses;
+    return 0; // Не знайдено
 }
