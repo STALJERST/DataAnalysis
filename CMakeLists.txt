@@ -7,6 +7,8 @@ add_executable(dataAnalysis
         window.cpp
         RenderWindow.cpp
         RenderWindow.h
+        MemoryEngine.h
+        MemoryEngine.cpp
 )
 
 target_link_libraries(dataAnalysis comctl32)

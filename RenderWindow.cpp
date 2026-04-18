@@ -1,4 +1,11 @@
 #include "RenderWindow.h"
+#include <tlhelp32.h>
+#include <algorithm>
+#include <cwctype>
+#include <fstream>
+#include <cstdlib>
+#include <sstream>
+#include <iomanip>
 
 RenderWindow::RenderWindow() {
     m_hwnd = NULL;
@@ -7,29 +14,22 @@ RenderWindow::RenderWindow() {
 
 bool RenderWindow::Create(const wchar_t* title, int width, int height) {
     HINSTANCE hInstance = GetModuleHandle(NULL);
-
     WNDCLASSW wc = {};
     wc.lpfnWndProc = RenderWindow::StaticWindowProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = L"MyRendererClass";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-
     RegisterClassW(&wc);
 
-    m_hwnd = CreateWindowExW(
-        0, L"MyRendererClass", title,
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, width, height,
-        NULL, NULL, hInstance, this
-    );
+    m_hwnd = CreateWindowExW(0, L"MyRendererClass", title, WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, width, height, NULL, NULL, hInstance, this);
 
     return m_hwnd != NULL;
 }
 
 LRESULT CALLBACK RenderWindow::StaticWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     RenderWindow* pThis = nullptr;
-
     if (uMsg == WM_NCCREATE) {
         CREATESTRUCT* pCreate = (CREATESTRUCT*)lParam;
         pThis = (RenderWindow*)pCreate->lpCreateParams;
@@ -38,23 +38,12 @@ LRESULT CALLBACK RenderWindow::StaticWindowProc(HWND hwnd, UINT uMsg, WPARAM wPa
     } else {
         pThis = (RenderWindow*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
     }
-
-    if (pThis) {
-        return pThis->HandleMessage(uMsg, wParam, lParam);
-    }
-
+    if (pThis) return pThis->HandleMessage(uMsg, wParam, lParam);
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
-
-
-void RenderWindow::AddData(const std::wstring& name, DWORD pid) {
-    m_allData.push_back({name, pid});
-    ListView_SetItemCount(m_hListView, m_allData.size()); // Оновлюємо віртуальний список
-}
-
 void RenderWindow::LoadProcesses() {
-    m_allData.clear(); // Очищаємо головну базу
+    m_allData.clear();
 
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot != INVALID_HANDLE_VALUE) {
@@ -63,78 +52,150 @@ void RenderWindow::LoadProcesses() {
 
         if (Process32FirstW(hSnapshot, &processEntry)) {
             do {
-                m_allData.push_back({processEntry.szExeFile, processEntry.th32ProcessID});
+                DataItem item;
+                item.processName = processEntry.szExeFile;
+                item.processID = processEntry.th32ProcessID;
+                item.creationTime = {0, 0};
+                item.launchTimeStr = L"Немає доступу";
+                item.uptimeStr = L"-";
+
+                // Використовуємо LIMITED_INFORMATION, щоб система пустила нас до більшості процесів
+                HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, item.processID);
+                if (hProc) {
+                    FILETIME ftCreation, ftExit, ftKernel, ftUser;
+                    if (GetProcessTimes(hProc, &ftCreation, &ftExit, &ftKernel, &ftUser)) {
+                        item.creationTime = ftCreation;
+
+                        // 1. Форматуємо час запуску (Години:Хвилини:Секунди)
+                        SYSTEMTIME stUTC, stLocal;
+                        FileTimeToSystemTime(&ftCreation, &stUTC);
+                        SystemTimeToTzSpecificLocalTime(NULL, &stUTC, &stLocal);
+
+                        wchar_t buf[64];
+                        swprintf(buf, 64, L"%02d:%02d:%02d", stLocal.wHour, stLocal.wMinute, stLocal.wSecond);
+                        item.launchTimeStr = buf;
+
+                        // 2. Рахуємо час роботи (Uptime)
+                        FILETIME ftNow;
+                        GetSystemTimeAsFileTime(&ftNow);
+                        ULARGE_INTEGER uCreation, uNow;
+                        uCreation.LowPart = ftCreation.dwLowDateTime;
+                        uCreation.HighPart = ftCreation.dwHighDateTime;
+                        uNow.LowPart = ftNow.dwLowDateTime;
+                        uNow.HighPart = ftNow.dwHighDateTime;
+
+                        if (uNow.QuadPart >= uCreation.QuadPart) {
+                            // Переводимо 100-наносекундні інтервали у секунди
+                            ULONGLONG totalSeconds = (uNow.QuadPart - uCreation.QuadPart) / 10000000ULL;
+                            ULONGLONG hours = totalSeconds / 3600;
+                            ULONGLONG mins = (totalSeconds % 3600) / 60;
+                            ULONGLONG secs = totalSeconds % 60;
+
+                            if (hours > 0) swprintf(buf, 64, L"%llu год %llu хв", hours, mins);
+                            else if (mins > 0) swprintf(buf, 64, L"%llu хв %llu с", mins, secs);
+                            else swprintf(buf, 64, L"%llu с", secs);
+
+                            item.uptimeStr = buf;
+                        }
+                    }
+                    CloseHandle(hProc);
+                }
+                m_allData.push_back(item);
             } while (Process32NextW(hSnapshot, &processEntry));
         }
         CloseHandle(hSnapshot);
     }
-
-    // Після завантаження всіх процесів відразу запускаємо фільтр (щоб відобразити їх)
-    FilterData();
+    FilterData(); // Відфільтрує і одразу відсортує
 }
 
 LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_CREATE: {
             SetupControls();
-            LoadProcesses(); // Отримуємо та виводимо процеси під час запуску
+            LoadProcesses();
             return 0;
         }
         case WM_SIZE: {
             int width = LOWORD(lParam);
             int height = HIWORD(lParam);
-            int sideWidth = std::max(width / 6, 160); // Ліва панель
+            int sideWidth = std::max(width / 6, 160);
             int mainX = sideWidth + 10;
             int mainWidth = width - mainX - 10;
-            int listWidth = width / 6;
 
-            int listHeight = (height - 110) / 2;
+            int topOffset = 65;
+            int listHeight = (height - topOffset - 30) / 3;
 
-            // --- Ліва панель ---
-            SetWindowPos(m_hSearchCombo, NULL, 5, 5, sideWidth - 10, 25, SWP_NOZORDER);
+            SetWindowPos(m_hSearchCombo, NULL, 5, 5, sideWidth - 10, 150, SWP_NOZORDER);
             SetWindowPos(m_hSearchEdit, NULL, 5, 35, sideWidth - 10, 25, SWP_NOZORDER);
-            SetWindowPos(m_hListView, NULL, 5, 65, sideWidth - 10, height - 65 - 40, SWP_NOZORDER);
-            SetWindowPos(m_hLaunchBtn, NULL, 5, height - 35, sideWidth - 10, 30, SWP_NOZORDER);
+            SetWindowPos(m_hListView, NULL, 5, 95, sideWidth - 10, height - 95 - 40, SWP_NOZORDER);
 
-            // Адаптуємо колонки лівого списку
-            ListView_SetColumnWidth(m_hListView, 0, listWidth - 70 - 15);
-            ListView_SetColumnWidth(m_hListView, 1, 60);
+            SetWindowPos(m_hToolsCombo, NULL, 5, height - 35, sideWidth - 85, 150, SWP_NOZORDER);
+            SetWindowPos(m_hExecuteToolBtn, NULL, sideWidth - 75, height - 36, 70, 24, SWP_NOZORDER);
 
-            // --- Права панель ---
+            SetWindowPos(m_hSortCombo, NULL, 5, 65, sideWidth - 10, 150, SWP_NOZORDER);
+
             SetWindowPos(m_hPidLabel, NULL, mainX, 5, mainWidth, 20, SWP_NOZORDER);
             SetWindowPos(m_hScanEdit, NULL, mainX, 30, 80, 25, SWP_NOZORDER);
-            SetWindowPos(m_hTypeCombo, NULL, mainX + 90, 30, 120, 25, SWP_NOZORDER);
-            SetWindowPos(m_hScanBtn, NULL, mainX + 220, 30, 140, 25, SWP_NOZORDER);
-            SetWindowPos(m_hNextScanBtn, NULL, mainX + 370, 30, 120, 25, SWP_NOZORDER);
+            SetWindowPos(m_hTypeCombo, NULL, mainX + 90, 30, 150,25, SWP_NOZORDER);
+            SetWindowPos(m_hScanBtn, NULL, mainX + 200, 30, 140, 25, SWP_NOZORDER);
+            SetWindowPos(m_hNextScanBtn, NULL, mainX + 350, 30, 140, 25, SWP_NOZORDER);
 
-            // Два списки ділять висоту навпіл
-            SetWindowPos(m_hResultsList, NULL, mainX, 65, mainWidth, listHeight, SWP_NOZORDER);
-            SetWindowPos(m_hSavedList, NULL, mainX, 65 + listHeight + 10, mainWidth, listHeight, SWP_NOZORDER);
-
+            SetWindowPos(m_hResultsList, NULL, mainX, topOffset, mainWidth, listHeight, SWP_NOZORDER);
+            SetWindowPos(m_hSavedList, NULL, mainX, topOffset + listHeight + 5, mainWidth, listHeight, SWP_NOZORDER);
+            SetWindowPos(m_hStaticList, NULL, mainX, topOffset + (listHeight * 2) + 10, mainWidth, listHeight, SWP_NOZORDER);
             return 0;
         }
 
         case WM_NOTIFY: {
             LPNMHDR lpnmh = (LPNMHDR)lParam;
+            if (lpnmh->idFrom == IDC_STATIC_LIST && lpnmh->code == LVN_GETDISPINFOW) {
+                NMLVDISPINFOW* pDispInfo = (NMLVDISPINFOW*)lParam;
+                if (pDispInfo->item.mask & LVIF_TEXT) {
+                    int row = pDispInfo->item.iItem;
+                    int col = pDispInfo->item.iSubItem;
 
-            if (lpnmh->idFrom == 1001 && lpnmh->code == LVN_GETDISPINFOW) {
-            NMLVDISPINFOW* pDispInfo = (NMLVDISPINFOW*)lParam;
-
-            if (pDispInfo->item.mask & LVIF_TEXT) {
-                int row = pDispInfo->item.iItem;
-                int col = pDispInfo->item.iSubItem;
-
-                // ВАЖЛИВО: Тепер ми беремо дані з m_filteredData!
-                if (row < 0 || row >= m_filteredData.size()) return 0;
-
-                if (col == 0) {
-                    lstrcpynW(pDispInfo->item.pszText, m_filteredData[row].processName.c_str(), pDispInfo->item.cchTextMax);
-                } else if (col == 1) {
-                    std::wstring valStr = std::to_wstring(m_filteredData[row].processID);
-                    lstrcpynW(pDispInfo->item.pszText, valStr.c_str(), pDispInfo->item.cchTextMax);
+                    if (row >= 0 && row < m_staticItems.size()) {
+                        if (col == 0) {
+                            lstrcpynW(pDispInfo->item.pszText, m_staticItems[row].name.c_str(), pDispInfo->item.cchTextMax);
+                        } else if (col == 1) {
+                            if (m_staticItems[row].resolvedAddress == 0) {
+                                swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"??? (Не знайдено)");
+                            } else {
+                                swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"0x%p", (void*)m_staticItems[row].resolvedAddress);
+                            }
+                        } else if (col == 2) {
+                            if (m_staticItems[row].resolvedAddress != 0) {
+                                int currentVal = 0;
+                                HANDLE hProc = OpenProcess(PROCESS_VM_READ, FALSE, m_selectedPID);
+                                if (hProc) {
+                                    ReadProcessMemory(hProc, (LPCVOID)m_staticItems[row].resolvedAddress, &currentVal, sizeof(int), NULL);
+                                    CloseHandle(hProc);
+                                    swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%d", currentVal);
+                                }
+                            } else {
+                                swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"-");
+                            }
+                        }
+                    }
                 }
             }
-        }
+
+            if (lpnmh->idFrom == 1001 && lpnmh->code == LVN_GETDISPINFOW) {
+                NMLVDISPINFOW* pDispInfo = (NMLVDISPINFOW*)lParam;
+                if (pDispInfo->item.mask & LVIF_TEXT) {
+                    int row = pDispInfo->item.iItem;
+                    int col = pDispInfo->item.iSubItem;
+                    if (row < 0 || row >= m_filteredData.size()) return 0;
+
+                    if (col == 0) {
+                        lstrcpynW(pDispInfo->item.pszText, m_filteredData[row].processName.c_str(), pDispInfo->item.cchTextMax);
+                    } else if (col == 1) {
+                        std::wstring valStr = std::to_wstring(m_filteredData[row].processID);
+                        lstrcpynW(pDispInfo->item.pszText, valStr.c_str(), pDispInfo->item.cchTextMax);
+                    }
+                }
+            }
+
             if (lpnmh->idFrom == IDC_RESULTS_LIST && lpnmh->code == LVN_GETDISPINFOW) {
                 NMLVDISPINFOW* pDispInfo = (NMLVDISPINFOW*)lParam;
                 if (pDispInfo->item.mask & LVIF_TEXT) {
@@ -142,86 +203,46 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
                     int col = pDispInfo->item.iSubItem;
 
                     if (row >= 0 && row < m_scanResults.size()) {
-                        if (col == 0) { // Вивід адреси у HEX форматі
+                        if (col == 0) {
                             swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"0x%p", (void*)m_scanResults[row]);
-                        } else if (col == 1) { // Вивід значення (перевіряємо ще раз RPM)
-                            int currentVal = 0;
+                        } else if (col == 1) {
                             HANDLE hProc = OpenProcess(PROCESS_VM_READ, FALSE, m_selectedPID);
-                            ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &currentVal, sizeof(int), NULL);
-                            CloseHandle(hProc);
-                            swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%d", currentVal);
-                        }
-                    } else if (col == 1) {
-                        HANDLE hProc = OpenProcess(PROCESS_VM_READ, FALSE, m_selectedPID);
-                        if (hProc) {
-                            // ЧИТАЄМО І ВИВОДИМО ЗАЛЕЖНО ВІД ПОТОЧНОГО ТИПУ
-                            switch (m_currentScanType) {
-                                case TYPE_INT: {
-                                    int val = 0;
-                                    ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(int), NULL);
-                                    swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%d", val);
-                                    break;
+                            if (hProc) {
+                                switch (m_currentScanType) {
+                                    case TYPE_INT: {
+                                        int val = 0; ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(int), NULL);
+                                        swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%d", val); break;
+                                    }
+                                    case TYPE_FLOAT: {
+                                        float val = 0.0f; ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(float), NULL);
+                                        swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%.2f", val); break;
+                                    }
+                                    case TYPE_BYTE: {
+                                        BYTE val = 0; ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(BYTE), NULL);
+                                        swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%u", val); break;
+                                    }
                                 }
-                                case TYPE_FLOAT: {
-                                    float val = 0.0f;
-                                    ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(float), NULL);
-                                    swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%.2f", val); // %.2f - дві цифри після коми
-                                    break;
-                                }
-                                case TYPE_BYTE: {
-                                    BYTE val = 0;
-                                    ReadProcessMemory(hProc, (LPCVOID)m_scanResults[row], &val, sizeof(BYTE), NULL);
-                                    swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%u", val); // %u - беззнакове ціле
-                                    break;
-                                }
+                                CloseHandle(hProc);
                             }
-                            CloseHandle(hProc);
                         }
                     }
-
                 }
             }
 
             if (lpnmh->idFrom == 1001 && lpnmh->code == NM_RCLICK) {
                 LPNMITEMACTIVATE pnmitem = (LPNMITEMACTIVATE)lParam;
-                // ВАЖЛИВО: Отримуємо PID також з m_filteredData!
-
                 if (pnmitem->iItem >= 0 && pnmitem->iItem < m_filteredData.size()) {
                     m_selectedPID = m_filteredData[pnmitem->iItem].processID;
                     UpdatePidLabel();
-
-                    // 2. Створюємо пусте контекстне меню
-                    HMENU hMenu = CreatePopupMenu();
-
-                    // 3. Додаємо пункти меню
-                    AppendMenuW(hMenu, MF_STRING, IDM_READ_MEM, L"Читати пам'ять");
-                    AppendMenuW(hMenu, MF_STRING, IDM_WRITE_MEM, L"Записати пам'ять");
-
-                    // Можна додати розділювач (лінію)
-                    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-                    AppendMenuW(hMenu, MF_STRING, 4003, L"Властивості (для прикладу)");
-
-                    // 4. Отримуємо координати курсора миші на екрані (TrackPopupMenu вимагає екранні координати)
-                    POINT pt;
-                    GetCursorPos(&pt);
-
-                    // 5. Показуємо меню.
-                    // TPM_RETURNCMD означає, що меню поверне ID вибраного пункту, або 0, якщо клікнули повз.
-                    // Ми відправляємо результат прямо у наше вікно (m_hwnd).
-                    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_LEFTALIGN,
-                                   pt.x, pt.y, 0, m_hwnd, NULL);
-
-                    // 6. Обов'язково видаляємо меню з пам'яті після того, як воно закрилося
-                    DestroyMenu(hMenu);
                 }
             }
-            // ПОДВІЙНИЙ КЛІК ПО ЗБЕРЕЖЕНИХ АДРЕСАХ (Запис нового значення)
+
+
             if (lpnmh->idFrom == IDC_SAVED_LIST && lpnmh->code == LVN_GETDISPINFOW) {
                 NMLVDISPINFOW* pDispInfo = (NMLVDISPINFOW*)lParam;
                 if (pDispInfo->item.mask & LVIF_TEXT) {
                     int row = pDispInfo->item.iItem;
                     int col = pDispInfo->item.iSubItem;
-
                     if (row >= 0 && row < m_savedAddresses.size()) {
                         if (col == 0) {
                             swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"0x%p", (void*)m_savedAddresses[row]);
@@ -237,12 +258,30 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
                     }
                 }
             }
-            // ПРАВИЙ КЛІК ПО ЗБЕРЕЖЕНИМ АДРЕСАМ (Виклик Memory Dump)
+
+            if (lpnmh->idFrom == 1001 && lpnmh->code == LVN_GETDISPINFOW) {
+                NMLVDISPINFOW* pDispInfo = (NMLVDISPINFOW*)lParam;
+                if (pDispInfo->item.mask & LVIF_TEXT) {
+                    int row = pDispInfo->item.iItem;
+                    int col = pDispInfo->item.iSubItem;
+                    if (row < 0 || row >= m_filteredData.size()) return 0;
+
+                    if (col == 0) {
+                        lstrcpynW(pDispInfo->item.pszText, m_filteredData[row].processName.c_str(), pDispInfo->item.cchTextMax);
+                    } else if (col == 1) {
+                        std::wstring valStr = std::to_wstring(m_filteredData[row].processID);
+                        lstrcpynW(pDispInfo->item.pszText, valStr.c_str(), pDispInfo->item.cchTextMax);
+                    } else if (col == 2) {
+                        lstrcpynW(pDispInfo->item.pszText, m_filteredData[row].launchTimeStr.c_str(), pDispInfo->item.cchTextMax);
+                    } else if (col == 3) {
+                        lstrcpynW(pDispInfo->item.pszText, m_filteredData[row].uptimeStr.c_str(), pDispInfo->item.cchTextMax);
+                    }
+                }
+            }
+
             if (lpnmh->idFrom == IDC_SAVED_LIST && lpnmh->code == NM_RCLICK) {
                 LPNMITEMACTIVATE pnmitem = (LPNMITEMACTIVATE)lParam;
-
                 if (pnmitem->iItem >= 0 && pnmitem->iItem < m_savedAddresses.size()) {
-                    // Викликаємо наш новий метод, передаючи йому адресу!
                     ShowMemoryDump(m_savedAddresses[pnmitem->iItem]);
                 }
             }
@@ -250,7 +289,6 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
             if (lpnmh->idFrom == IDC_RESULTS_LIST && lpnmh->code == NM_DBLCLK) {
                 LPNMITEMACTIVATE pnmitem = (LPNMITEMACTIVATE)lParam;
                 if (pnmitem->iItem >= 0 && pnmitem->iItem < m_scanResults.size()) {
-                    // Копіюємо адресу вниз
                     m_savedAddresses.push_back(m_scanResults[pnmitem->iItem]);
                     ListView_SetItemCount(m_hSavedList, m_savedAddresses.size());
                     InvalidateRect(m_hSavedList, NULL, TRUE);
@@ -263,23 +301,13 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
             int wmId = LOWORD(wParam);
             int wmEvent = HIWORD(wParam);
 
-            // Якщо користувач ВВІВ ТЕКСТ у поле пошуку
-            if (wmId == IDC_SEARCH_EDIT && wmEvent == EN_CHANGE) {
-                FilterData();
-            }
-            // Якщо користувач ЗМІНИВ КРИТЕРІЙ у списку (Назва/PID)
+            if (wmId == IDC_SEARCH_EDIT && wmEvent == EN_CHANGE) { FilterData(); }
             else if (wmId == IDC_SEARCH_COMBO && wmEvent == CBN_SELCHANGE) {
                 FilterData();
-                SetFocus(m_hSearchEdit); // Повертаємо фокус назад на поле вводу для зручності
+                SetFocus(m_hSearchEdit);
             }
-            // Перевіряємо, чи вибрали щось із нашого контекстного меню
-            if (wmId == IDM_READ_MEM) {
-                std::wstring msg = L"Вибрано ЧИТАННЯ для PID: " + std::to_wstring(m_selectedPID);
-                MessageBoxW(m_hwnd, msg.c_str(), L"Дія контекстного меню", MB_OK | MB_ICONINFORMATION);
-            }
-            else if (wmId == IDM_WRITE_MEM) {
-                std::wstring msg = L"Вибрано ЗАПИС для PID: " + std::to_wstring(m_selectedPID);
-                MessageBoxW(m_hwnd, msg.c_str(), L"Дія контекстного меню", MB_OK | MB_ICONINFORMATION);
+            else if (wmId == IDC_SORT_COMBO && wmEvent == CBN_SELCHANGE) {
+                SortProcesses();
             }
             else if (wmId == IDC_SCAN_BUTTON || wmId == IDC_NEXT_SCAN_BUTTON) {
                 if (m_selectedPID == 0) {
@@ -289,457 +317,272 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
                 wchar_t buf[32];
                 GetWindowTextW(m_hScanEdit, buf, 32);
-
-                // Дізнаємось вибраний тип
-                int selectedType = SendMessageW(m_hTypeCombo, CB_GETCURSEL, 0, 0);
-                m_currentScanType = (ScanDataType)selectedType; // Запам'ятовуємо
+                m_currentScanType = (ScanDataType)SendMessageW(m_hTypeCombo, CB_GETCURSEL, 0, 0);
 
                 SetCursor(LoadCursor(NULL, IDC_WAIT));
 
-                // Робимо магію залежно від типу
                 if (m_currentScanType == TYPE_INT) {
                     int val = _wtoi(buf);
-                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = ScanMemory<int>(m_selectedPID, val);
-                    else m_scanResults = NextScanMemory<int>(m_selectedPID, val);
+                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = MemoryEngine::Scan<int>(m_selectedPID, val);
+                    else m_scanResults = MemoryEngine::NextScan<int>(m_selectedPID, m_scanResults, val);
                 }
                 else if (m_currentScanType == TYPE_FLOAT) {
-                    float val = (float)_wtof(buf); // Читаємо як float
-                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = ScanMemory<float>(m_selectedPID, val);
-                    else m_scanResults = NextScanMemory<float>(m_selectedPID, val);
+                    float val = (float)_wtof(buf);
+                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = MemoryEngine::Scan<float>(m_selectedPID, val);
+                    else m_scanResults = MemoryEngine::NextScan<float>(m_selectedPID, m_scanResults, val);
                 }
                 else if (m_currentScanType == TYPE_BYTE) {
-                    BYTE val = (BYTE)_wtoi(buf); // 1 байт - це число від 0 до 255
-                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = ScanMemory<BYTE>(m_selectedPID, val);
-                    else m_scanResults = NextScanMemory<BYTE>(m_selectedPID, val);
+                    BYTE val = (BYTE)_wtoi(buf);
+                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = MemoryEngine::Scan<BYTE>(m_selectedPID, val);
+                    else m_scanResults = MemoryEngine::NextScan<BYTE>(m_selectedPID, m_scanResults, val);
                 }
 
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
-
                 ListView_SetItemCount(m_hResultsList, m_scanResults.size());
                 InvalidateRect(m_hResultsList, NULL, TRUE);
             }
+            else if (wmId == IDC_BTN_EXECUTE_TOOL) {
+                int selectedTool = SendMessageW(m_hToolsCombo, CB_GETCURSEL, 0, 0);
 
-            else if (wmId == IDC_BTN_LAUNCH_TEST) {
-    // 1. Наш заготовлений код манекена у вигляді тексту (Raw String)
-    const char* dummySourceCode = R"(
-#include <iostream>
+                if (selectedTool == 0) {
+                    // Запустити манекен
+                    const char* dummySourceCode = R"(#include <iostream>
 #include <windows.h>
 #include <conio.h>
 
 int main() {
-    SetConsoleOutputCP(1251);
     int playerMoney = 100;
 
-    std::cout << "maneken\n";
-    std::cout << "PID: " << GetCurrentProcessId() << "\n\n";
+    while(true) {
+        std::cout <<" money: " << std::dec << playerMoney << " | adress: 0x" << std::hex << &playerMoney << std::dec << "\n";
+        std::cout << "[SPACE] -10\n";
 
-    while (true) {
-        std::cout << "Баланс: " << playerMoney << " | Адреса (HEX): 0x" << std::hex << &playerMoney << std::dec << "\n";
-        std::cout << "[ПРОБІЛ] -10 монет | [R] Скинути | [ESC] Вихід\n";
-
-        char key = _getch();
-        if (key == ' ') playerMoney -= 10;
-        else if (key == 'r' || key == 'R') playerMoney = 100;
-        else if (key == 27) break;
-
+        if(_getch() == ' ') playerMoney -= 10;
         system("cls");
-        std::cout << "maneken\n";
-        std::cout << "PID: " << GetCurrentProcessId() << "\n\n";
     }
     return 0;
-}
-    )";
+})";
 
-    // 2. Створюємо вихідний файл .cpp на диску
-    std::ofstream outFile("GeneratedDummy.cpp");
-    if (outFile.is_open()) {
-        outFile << dummySourceCode;
-        outFile.close();
-    }
-                else {
-        MessageBoxW(m_hwnd, L"Не вдалося створити файл GeneratedDummy.cpp", L"Помилка", MB_ICONERROR);
-        return 0;
-    }
-
-    // Змінюємо курсор, бо компіляція займе 1-2 секунди
-    SetCursor(LoadCursor(NULL, IDC_WAIT));
-
-    // 3. Викликаємо компілятор g++ для збірки нашого коду
-    // Функція system() блокує виконання нашої програми, поки компіляція не завершиться
-    int compileResult = system("g++ GeneratedDummy.cpp -o GeneratedDummy.exe");
-
-    SetCursor(LoadCursor(NULL, IDC_ARROW));
-
-    if (compileResult != 0) {
-        MessageBoxW(m_hwnd, L"Помилка компіляції! Переконайтеся, що g++ додано до PATH вашої системи.", L"Помилка", MB_ICONERROR);
-        return 0;
-    }
-
-    // 4. Якщо компіляція успішна - запускаємо створений GeneratedDummy.exe
-    STARTUPINFOW si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-
-    if (CreateProcessW(L"GeneratedDummy.exe", NULL, NULL, NULL, FALSE,
-                       CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
-
-        // Оновлюємо список процесів
-        LoadProcesses();
-
-        // Автоматично наводимо сканер на новий процес
-        m_selectedPID = pi.dwProcessId;
-
-        UpdatePidLabel();
-
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-
-        std::wstring msg = L"Манекен згенеровано, скомпільовано і запущено!\nPID: " + std::to_wstring(m_selectedPID);
-        MessageBoxW(m_hwnd, msg.c_str(), L"Успіх", MB_OK | MB_ICONINFORMATION);
-    } else {
-        MessageBoxW(m_hwnd, L"Не вдалося запустити згенерований файл GeneratedDummy.exe", L"Помилка", MB_ICONERROR);
-    }
-}
-
+                    std::ofstream outFile("GeneratedDummy.cpp");
+                    if (outFile.is_open()) { outFile << dummySourceCode; outFile.close(); }
+                    SetCursor(LoadCursor(NULL, IDC_WAIT));
+                    if (system("g++ GeneratedDummy.cpp -o GeneratedDummy.exe") == 0) {
+                        STARTUPINFOW si = { sizeof(si) }; PROCESS_INFORMATION pi;
+                        if (CreateProcessW(L"GeneratedDummy.exe", NULL, NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi)) {
+                            LoadProcesses(); m_selectedPID = pi.dwProcessId; UpdatePidLabel();
+                            CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+                        }
+                    }
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                }
+                else if (selectedTool == 1) {
+                    // Додати AOB
+                    StaticSignature mockAOB;
+                    mockAOB.name = L"Тестова сигнатура";
+                    mockAOB.pattern = "\x89\x45\xFC\x8B\x0D\x00\x00\x00\x00";
+                    mockAOB.mask = "xxxxx????";
+                    mockAOB.resolvedAddress = 0;
+                    m_staticItems.push_back(mockAOB);
+                    ListView_SetItemCount(m_hStaticList, m_staticItems.size());
+                    InvalidateRect(m_hStaticList, NULL, TRUE);
+                }
+                else if (selectedTool == 2) {
+                    // Оновити AOB ВИКОРИСТОВУЮЧИ ЯДРО!
+                    if (m_selectedPID == 0) return 0;
+                    SetCursor(LoadCursor(NULL, IDC_WAIT));
+                    for (auto& item : m_staticItems) {
+                        item.resolvedAddress = MemoryEngine::PatternScan(m_selectedPID, item.pattern.c_str(), item.mask.c_str());
+                    }
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                    InvalidateRect(m_hStaticList, NULL, TRUE);
+                }
+            }
             return 0;
         }
-
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
+        case WM_DESTROY: PostQuitMessage(0); return 0;
     }
     return DefWindowProc(m_hwnd, uMsg, wParam, lParam);
 }
 
 void RenderWindow::SetupControls() {
-    // 1. Створюємо випадаючий список для вибору критерію
-    m_hSearchCombo = CreateWindowExW(0, WC_COMBOBOXW, L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-        0, 0, 0, 150, // Висота 150 - це висота списку, коли він відкритий
-        m_hwnd, (HMENU)IDC_SEARCH_COMBO, NULL, NULL);
+    m_hSearchCombo = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 0, 0, 0, 150, m_hwnd, (HMENU)IDC_SEARCH_COMBO, NULL, NULL);
+    SendMessageW(m_hSearchCombo, CB_ADDSTRING, 0, (LPARAM)L"Шукати по назві"); SendMessageW(m_hSearchCombo, CB_ADDSTRING, 0, (LPARAM)L"Шукати по PID");
+    SendMessageW(m_hSearchCombo, CB_SETCURSEL, 0, 0);
 
-    SendMessageW(m_hSearchCombo, CB_ADDSTRING, 0, (LPARAM)L"Шукати по назві");
-    SendMessageW(m_hSearchCombo, CB_ADDSTRING, 0, (LPARAM)L"Шукати по PID");
-    SendMessageW(m_hSearchCombo, CB_SETCURSEL, 0, 0); // Вибираємо перший пункт за замовчуванням
-
-    // 2. Створюємо поле для вводу тексту
-    m_hSearchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"",
-        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-        0, 0, 0, 0,
-        m_hwnd, (HMENU)IDC_SEARCH_EDIT, NULL, NULL);
-
-    // 3. Створюємо наш список (той самий код)
-    m_hListView = CreateWindowExW(0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA,
-        0, 0, 0, 0, m_hwnd, (HMENU)1001, NULL, NULL);
-
+    m_hSearchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_SEARCH_EDIT, NULL, NULL);
+    m_hListView = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA, 0, 0, 0, 0, m_hwnd, (HMENU)1001, NULL, NULL);
     ListView_SetExtendedListViewStyle(m_hListView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
-    LVCOLUMNW lvc = {0};
-    lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM;
-    lvc.fmt = LVCFMT_LEFT;
+    LVCOLUMNW lvc = {0}; lvc.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT | LVCF_SUBITEM; lvc.fmt = LVCFMT_LEFT;
+    lvc.iSubItem = 0; lvc.cx = 100; lvc.pszText = (LPWSTR)L"Назва"; SendMessageW(m_hListView, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvc);
+    lvc.iSubItem = 1; lvc.cx = 60; lvc.pszText = (LPWSTR)L"PID"; SendMessageW(m_hListView, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvc);
 
-    m_hPidLabel = CreateWindowExW(0, L"STATIC", L"Вибраний процес (PID): Немає",
-    WS_CHILD | WS_VISIBLE | SS_LEFT, // SS_LEFT - вирівнювання по лівому краю
-    0, 0, 0, 0, m_hwnd, (HMENU)IDC_PID_LABEL, NULL, NULL);
+    m_hPidLabel = CreateWindowExW(0, L"STATIC", L"Вибраний процес (PID): Немає", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_PID_LABEL, NULL, NULL);
+    m_hScanEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"100", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_SCAN_EDIT, NULL, NULL);
 
-    lvc.iSubItem = 0; lvc.cx = 100; lvc.pszText = (LPWSTR)L"Назва";
-    SendMessageW(m_hListView, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvc);
-
-    lvc.iSubItem = 1; lvc.cx = 60; lvc.pszText = (LPWSTR)L"PID";
-    SendMessageW(m_hListView, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvc);
-
-    m_hScanEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"100",
-            WS_CHILD | WS_VISIBLE | ES_NUMBER, // Тільки цифри
-            0, 0, 0, 0, m_hwnd, (HMENU)IDC_SCAN_EDIT, NULL, NULL);
-
-    // 2. Кнопка сканування
-    m_hScanBtn = CreateWindowExW(0, L"BUTTON", L"Перше сканування",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        0, 0, 0, 0, m_hwnd, (HMENU)IDC_SCAN_BUTTON, NULL, NULL);
-
-    // 3. Список результатів (теж віртуальний LVS_OWNERDATA)
-    m_hResultsList = CreateWindowExW(0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA,
-        0, 0, 0, 0, m_hwnd, (HMENU)IDC_RESULTS_LIST, NULL, NULL);
-
-    m_hNextScanBtn = CreateWindowExW(0, L"BUTTON", L"Відсіяти (Next)",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        0, 0, 0, 0, m_hwnd, (HMENU)IDC_NEXT_SCAN_BUTTON, NULL, NULL);
-
-
-    ListView_SetExtendedListViewStyle(m_hResultsList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-
-    // Колонки для списку результатів
-    LVCOLUMNW lvc1 = {0};
-    lvc1.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT;
-    lvc1.fmt = LVCFMT_LEFT;
-
-    lvc1.cx = 140; lvc1.pszText = (LPWSTR)L"Адреса";
-    SendMessageW(m_hResultsList, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvc1);
-
-    lvc1.cx = 100; lvc1.pszText = (LPWSTR)L"Значення";
-    SendMessageW(m_hResultsList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvc1);
-
-
-
-    // Список збережених адрес
-    m_hSavedList = CreateWindowExW(0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA,
-        0, 0, 0, 0, m_hwnd, (HMENU)IDC_SAVED_LIST, NULL, NULL);
-
-    ListView_SetExtendedListViewStyle(m_hSavedList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-
-    m_hLaunchBtn = CreateWindowExW(0, L"BUTTON", L" Запустити манекен",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_LAUNCH_TEST, NULL, NULL);
-
-    LVCOLUMNW lvcSaved = {0};
-    lvcSaved.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT;
-    lvcSaved.fmt = LVCFMT_LEFT;
-
-    lvcSaved.cx = 140; lvcSaved.pszText = (LPWSTR)L"Збережена Адреса";
-    SendMessageW(m_hSavedList, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvcSaved);
-
-    lvcSaved.cx = 100; lvcSaved.pszText = (LPWSTR)L"Поточне Значення";
-    SendMessageW(m_hSavedList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvcSaved);
-
-
-    m_hTypeCombo = CreateWindowExW(0, WC_COMBOBOXW, L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-        0, 0, 0, 150, m_hwnd, (HMENU)IDC_TYPE_COMBO, NULL, NULL);
-
+    m_hTypeCombo = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 0, 0, 0, 150, m_hwnd, (HMENU)IDC_TYPE_COMBO, NULL, NULL);
     SendMessageW(m_hTypeCombo, CB_ADDSTRING, 0, (LPARAM)L"4 Байти (Int)");
     SendMessageW(m_hTypeCombo, CB_ADDSTRING, 0, (LPARAM)L"Float (Дробове)");
-    SendMessageW(m_hTypeCombo, CB_ADDSTRING, 0, (LPARAM)L"1 Байт (Byte)");
-    SendMessageW(m_hTypeCombo, CB_SETCURSEL, 0, 0); // За замовчуванням - Int
+    SendMessageW(m_hTypeCombo, CB_ADDSTRING, 0, (LPARAM)L"1 Байт (Byte)"); SendMessageW(m_hTypeCombo, CB_SETCURSEL, 0, 0);
 
+    m_hScanBtn = CreateWindowExW(0, L"BUTTON", L"Перше сканування", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_SCAN_BUTTON, NULL, NULL);
+    m_hNextScanBtn = CreateWindowExW(0, L"BUTTON", L"Відсіяти (Next)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_NEXT_SCAN_BUTTON, NULL, NULL);
+
+    m_hResultsList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_RESULTS_LIST, NULL, NULL);
+    ListView_SetExtendedListViewStyle(m_hResultsList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    LVCOLUMNW lvc1 = {0}; lvc1.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT; lvc1.fmt = LVCFMT_LEFT;
+    lvc1.cx = 140; lvc1.pszText = (LPWSTR)L"Адреса"; SendMessageW(m_hResultsList, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvc1);
+    lvc1.cx = 100; lvc1.pszText = (LPWSTR)L"Значення"; SendMessageW(m_hResultsList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvc1);
+
+    m_hSavedList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_SAVED_LIST, NULL, NULL);
+    ListView_SetExtendedListViewStyle(m_hSavedList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    LVCOLUMNW lvcSaved = {0}; lvcSaved.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT; lvcSaved.fmt = LVCFMT_LEFT;
+    lvcSaved.cx = 140; lvcSaved.pszText = (LPWSTR)L"Збережена Адреса"; SendMessageW(m_hSavedList, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvcSaved);
+    lvcSaved.cx = 100; lvcSaved.pszText = (LPWSTR)L"Поточне Значення"; SendMessageW(m_hSavedList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvcSaved);
+
+    m_hToolsCombo = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 0, 0, 0, 150, m_hwnd, (HMENU)IDC_TOOLS_COMBO, NULL, NULL);
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Запустити манекен");
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Додати тест AOB");
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Оновити посилання"); SendMessageW(m_hToolsCombo, CB_SETCURSEL, 0, 0);
+
+    m_hExecuteToolBtn = CreateWindowExW(0, L"BUTTON", L"Виконати", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_EXECUTE_TOOL, NULL, NULL);
+
+    m_hStaticList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_STATIC_LIST, NULL, NULL);
+    ListView_SetExtendedListViewStyle(m_hStaticList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    LVCOLUMNW lvcStat = {0}; lvcStat.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT; lvcStat.fmt = LVCFMT_LEFT;
+    lvcStat.cx = 120; lvcStat.pszText = (LPWSTR)L"Назва"; SendMessageW(m_hStaticList, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvcStat);
+    lvcStat.cx = 150; lvcStat.pszText = (LPWSTR)L"Знайдена Адреса"; SendMessageW(m_hStaticList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvcStat);
+    lvcStat.cx = 80; lvcStat.pszText = (LPWSTR)L"Значення"; SendMessageW(m_hStaticList, LVM_INSERTCOLUMNW, 2, (LPARAM)&lvcStat);
+
+    m_hSortCombo = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+                                   0, 0, 0, 150, m_hwnd, (HMENU)IDC_SORT_COMBO, NULL, NULL);
+    SendMessageW(m_hSortCombo, CB_ADDSTRING, 0, (LPARAM)L"За алфавітом");
+    SendMessageW(m_hSortCombo, CB_ADDSTRING, 0, (LPARAM)L"За PID");
+    SendMessageW(m_hSortCombo, CB_ADDSTRING, 0, (LPARAM)L"Найстаріші (FIFO)");
+    SendMessageW(m_hSortCombo, CB_ADDSTRING, 0, (LPARAM)L"Найновіші (LIFO)");
+    SendMessageW(m_hSortCombo, CB_SETCURSEL, 0, 0);
+
+    lvc.iSubItem = 2; lvc.cx = 75; lvc.pszText = (LPWSTR)L"Запуск";
+    SendMessageW(m_hListView, LVM_INSERTCOLUMNW, 2, (LPARAM)&lvc);
+
+    lvc.iSubItem = 3; lvc.cx = 90; lvc.pszText = (LPWSTR)L"Робота";
+    SendMessageW(m_hListView, LVM_INSERTCOLUMNW, 3, (LPARAM)&lvc);
 }
 
-
 void RenderWindow::FilterData() {
-    // 1. Читаємо текст, який ввів користувач
     int len = GetWindowTextLengthW(m_hSearchEdit);
-    std::wstring query(len, L'\0');
-    GetWindowTextW(m_hSearchEdit, &query[0], len + 1);
+    std::wstring query(len, L'\0'); GetWindowTextW(m_hSearchEdit, &query[0], len + 1);
     if (len > 0) query.resize(len);
-
-    // Робимо запит маленькими літерами для незалежності від регістру
     std::transform(query.begin(), query.end(), query.begin(), ::towlower);
-
-    // 2. Дізнаємось, що вибрано в Комбобоксі (0 - Назва, 1 - PID)
     int filterMode = SendMessageW(m_hSearchCombo, CB_GETCURSEL, 0, 0);
 
-    // 3. Очищаємо список для відображення
     m_filteredData.clear();
-
-    // 4. Фільтруємо
     for (const auto& item : m_allData) {
-        if (query.empty()) {
-            // Якщо поле порожнє - додаємо все
-            m_filteredData.push_back(item);
-        } else {
-            if (filterMode == 0) { // Пошук по НАЗВІ
-                std::wstring nameLower = item.processName;
-                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::towlower);
-
-                if (nameLower.find(query) != std::wstring::npos) {
-                    m_filteredData.push_back(item);
-                }
-            }
-            else if (filterMode == 1) { // Пошук по PID
+        if (query.empty()) m_filteredData.push_back(item);
+        else {
+            if (filterMode == 0) {
+                std::wstring nameLower = item.processName; std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::towlower);
+                if (nameLower.find(query) != std::wstring::npos) m_filteredData.push_back(item);
+            } else if (filterMode == 1) {
                 std::wstring pidStr = std::to_wstring(item.processID);
-                if (pidStr.find(query) != std::wstring::npos) {
-                    m_filteredData.push_back(item);
-                }
+                if (pidStr.find(query) != std::wstring::npos) m_filteredData.push_back(item);
             }
         }
     }
-
-    // 5. Оновлюємо віртуальний список новими даними
     ListView_SetItemCount(m_hListView, m_filteredData.size());
-    InvalidateRect(m_hListView, NULL, TRUE); // Кажемо вікну перемалюватися
+    InvalidateRect(m_hListView, NULL, TRUE);
+    SortProcesses();
 }
 
 void RenderWindow::UpdatePidLabel() {
-    if (m_selectedPID == 0) {
-        SetWindowTextW(m_hPidLabel, L"Вибраний процес (PID): Немає");
-    } else {
-        std::wstring text = L" Цільовий процес (PID): " + std::to_wstring(m_selectedPID);
-        SetWindowTextW(m_hPidLabel, text.c_str());
-    }
+    if (m_selectedPID == 0) SetWindowTextW(m_hPidLabel, L"Вибраний процес (PID): Немає");
+    else { std::wstring text = L" Цільовий процес (PID): " + std::to_wstring(m_selectedPID); SetWindowTextW(m_hPidLabel, text.c_str()); }
 }
-
-
 
 void RenderWindow::ShowMemoryDump(uintptr_t targetAddress) {
     if (m_selectedPID == 0) return;
-
-    // Читаємо 256 байт. Відступимо на 32 байти назад від нашої адреси,
-    // щоб цільове значення було десь посередині екрану.
-    const SIZE_T dumpSize = 256;
-    uintptr_t readAddress = targetAddress - 32;
-    std::vector<BYTE> buffer(dumpSize, 0);
-
+    const SIZE_T dumpSize = 256; uintptr_t readAddress = targetAddress - 32; std::vector<BYTE> buffer(dumpSize, 0);
     HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, m_selectedPID);
-    if (!hProcess) {
-        MessageBoxW(m_hwnd, L"Не вдалося відкрити процес для читання!", L"Помилка", MB_ICONERROR);
-        return;
-    }
-
-    SIZE_T bytesRead = 0;
-    ReadProcessMemory(hProcess, (LPCVOID)readAddress, buffer.data(), dumpSize, &bytesRead);
+    if (!hProcess) return;
+    SIZE_T bytesRead = 0; ReadProcessMemory(hProcess, (LPCVOID)readAddress, buffer.data(), dumpSize, &bytesRead);
     CloseHandle(hProcess);
 
-    // ФОРМАТУВАННЯ ТЕКСТУ (Магія Hex Editor'а)
     std::wstringstream ss;
     for (SIZE_T i = 0; i < bytesRead; i += 16) {
-        // 1. Колонка адреси
         ss << std::hex << std::uppercase << std::setw(8) << std::setfill(L'0') << (readAddress + i) << L" | ";
-
-        // 2. Колонка HEX байтів
         for (SIZE_T j = 0; j < 16; ++j) {
-            if (i + j < bytesRead) {
-                ss << std::hex << std::setw(2) << std::setfill(L'0') << (int)buffer[i + j] << L" ";
-            } else {
-                ss << L"   "; // Порожнє місце, якщо байти закінчилися
-            }
-            if (j == 7) ss << L" "; // Додатковий пробіл посередині для зручності
+            if (i + j < bytesRead) ss << std::hex << std::setw(2) << std::setfill(L'0') << (int)buffer[i + j] << L" ";
+            else ss << L"   ";
+            if (j == 7) ss << L" ";
         }
-
         ss << L" | ";
-
-        // 3. Колонка ASCII (зрозумілий текст)
         for (SIZE_T j = 0; j < 16; ++j) {
             if (i + j < bytesRead) {
                 char c = buffer[i + j];
-                // Виводимо тільки друковані символи (коди від 32 до 126)
-                if (c >= 32 && c <= 126) {
-                    ss << (wchar_t)c;
-                } else {
-                    ss << L"."; // Заміняємо незрозумілі байти крапкою
-                }
+                if (c >= 32 && c <= 126) ss << (wchar_t)c; else ss << L".";
             }
         }
-        ss << L"\r\n"; // Перехід на новий рядок
+        ss << L"\r\n";
     }
 
-    // Реєструємо клас вікна (якщо ще не зареєстрований)
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc = MemoryDumpProc;
-    wc.hInstance = GetModuleHandle(NULL);
-    wc.lpszClassName = L"MemoryDumpClass";
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    RegisterClassW(&wc);
-
-    // Створюємо контекст і передаємо туди наш готовий текст
+    WNDCLASSW wc = {}; wc.lpfnWndProc = MemoryDumpProc; wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = L"MemoryDumpClass"; wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); RegisterClassW(&wc);
     DumpContext* ctx = new DumpContext{ ss.str() };
-
-    // Створюємо вікно
-    CreateWindowExW(
-        0, L"MemoryDumpClass", L"Memory Dump",
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 700, 400, // Розмір вікна
-        m_hwnd, NULL, GetModuleHandle(NULL), ctx
-    );
+    CreateWindowExW(0, L"MemoryDumpClass", L"Memory Dump", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 700, 400, m_hwnd, NULL, GetModuleHandle(NULL), ctx);
 }
 
 LRESULT CALLBACK RenderWindow::MemoryDumpProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    static HWND hEdit = NULL;
-    static HFONT hFont = NULL;
-
+    static HWND hEdit = NULL; static HFONT hFont = NULL;
     switch (uMsg) {
         case WM_NCCREATE: {
-            CREATESTRUCT* pCreate = (CREATESTRUCT*)lParam;
-            DumpContext* ctx = (DumpContext*)pCreate->lpCreateParams;
-            SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
-            return TRUE;
+            CREATESTRUCT* pCreate = (CREATESTRUCT*)lParam; DumpContext* ctx = (DumpContext*)pCreate->lpCreateParams;
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)ctx); return TRUE;
         }
-
         case WM_CREATE: {
             DumpContext* ctx = (DumpContext*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
-
-            // Створюємо багаторядкове поле вводу ТІЛЬКИ ДЛЯ ЧИТАННЯ (ES_READONLY)
-            hEdit = CreateWindowExW(0, L"EDIT", ctx->text.c_str(),
-                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-                0, 0, 0, 0, hwnd, NULL, NULL, NULL);
-
-            // МАГІЯ: Створюємо моноширинний шрифт Consolas
-            hFont = CreateFontW(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-
-            // Застосовуємо шрифт до текстового поля
-            SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
-
-            delete ctx; // Очищаємо пам'ять
-            return 0;
+            hEdit = CreateWindowExW(0, L"EDIT", ctx->text.c_str(), WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0, hwnd, NULL, NULL, NULL);
+            hFont = CreateFontW(18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+            SendMessageW(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE); delete ctx; return 0;
         }
-
-        case WM_SIZE: {
-            // Розтягуємо текстове поле на все вікно
-            int width = LOWORD(lParam);
-            int height = HIWORD(lParam);
-            SetWindowPos(hEdit, NULL, 0, 0, width, height, SWP_NOZORDER);
-            return 0;
-        }
-
-        case WM_DESTROY: {
-            if (hFont) DeleteObject(hFont); // Видаляємо шрифт із пам'яті
-            return 0;
-        }
+        case WM_SIZE: { SetWindowPos(hEdit, NULL, 0, 0, LOWORD(lParam), HIWORD(lParam), SWP_NOZORDER); return 0; }
+        case WM_DESTROY: { if (hFont) DeleteObject(hFont); return 0; }
     }
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+void RenderWindow::SortProcesses() {
+    int sortMode = SendMessageW(m_hSortCombo, CB_GETCURSEL, 0, 0);
 
-uintptr_t RenderWindow::PatternScan(DWORD pid, const char* pattern, const char* mask) {
-    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (!hProcess) return 0;
-
-    SYSTEM_INFO sysInfo;
-    GetSystemInfo(&sysInfo);
-    uintptr_t currentAddr = (uintptr_t)sysInfo.lpMinimumApplicationAddress;
-    uintptr_t maxAddr = (uintptr_t)sysInfo.lpMaximumApplicationAddress;
-    MEMORY_BASIC_INFORMATION mbi;
-
-    size_t patternLen = strlen(mask);
-
-    // Проходимося по всіх блоках пам'яті
-    while (currentAddr < maxAddr) {
-        if (VirtualQueryEx(hProcess, (LPCVOID)currentAddr, &mbi, sizeof(mbi)) == 0) break;
-
-        // Шукаємо ТІЛЬКИ в пам'яті, де лежить ВИКОНУВАНИЙ КОД (PAGE_EXECUTE_READ або PAGE_EXECUTE_READWRITE)
-        if (mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_EXECUTE_READ || mbi.Protect & PAGE_EXECUTE_READWRITE)) {
-
-            std::vector<BYTE> buffer(mbi.RegionSize);
-            SIZE_T bytesRead = 0;
-
-            if (ReadProcessMemory(hProcess, mbi.BaseAddress, buffer.data(), mbi.RegionSize, &bytesRead)) {
-
-                // Проходимося по буферу і намагаємося накласти нашу маску
-                for (SIZE_T i = 0; i < bytesRead - patternLen; i++) {
-                    bool found = true;
-
-                    for (SIZE_T j = 0; j < patternLen; j++) {
-                        // Якщо маска 'x' і байти не збігаються - це не наш код
-                        if (mask[j] == 'x' && buffer[i + j] != (BYTE)pattern[j]) {
-                            found = false;
-                            break;
-                        }
-
-                    }
-
-                    if (found) {
-                        CloseHandle(hProcess);
-                        return (uintptr_t)mbi.BaseAddress + i; // Повертаємо адресу в пам'яті
-                    }
-                }
-            }
+    // Використовуємо лямбда-функцію для кастомного сортування
+    std::sort(m_filteredData.begin(), m_filteredData.end(), [sortMode](const DataItem& a, const DataItem& b) {
+        if (sortMode == 0) {
+            // За алфавітом
+            return a.processName < b.processName;
         }
-        currentAddr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
-    }
+        else if (sortMode == 1) {
+            // За PID
+            return a.processID < b.processID;
+        }
+        else if (sortMode == 2) {
+            // Найстаріші (FIFO - перші запущені)
+            ULARGE_INTEGER ta, tb;
+            ta.LowPart = a.creationTime.dwLowDateTime; ta.HighPart = a.creationTime.dwHighDateTime;
+            tb.LowPart = b.creationTime.dwLowDateTime; tb.HighPart = b.creationTime.dwHighDateTime;
 
-    CloseHandle(hProcess);
-    return 0; // Не знайдено
+            if (ta.QuadPart == 0) return false; // Ховаємо процеси без доступу вниз
+            if (tb.QuadPart == 0) return true;
+            return ta.QuadPart < tb.QuadPart;
+        }
+        else {
+            // Найновіші (LIFO - останні запущені)
+            ULARGE_INTEGER ta, tb;
+            ta.LowPart = a.creationTime.dwLowDateTime; ta.HighPart = a.creationTime.dwHighDateTime;
+            tb.LowPart = b.creationTime.dwLowDateTime; tb.HighPart = b.creationTime.dwHighDateTime;
+            return ta.QuadPart > tb.QuadPart;
+        }
+    });
+
+    ListView_SetItemCount(m_hListView, m_filteredData.size());
+    InvalidateRect(m_hListView, NULL, TRUE);
 }
