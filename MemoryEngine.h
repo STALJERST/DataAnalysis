@@ -5,6 +5,8 @@
 #include <vector>
 #include <string>
 #include <tlhelp32.h>
+#include <atomic>
+#include <future>
 
 class MemoryEngine {
 public:
@@ -47,22 +49,38 @@ public:
     }
 
     template <typename T>
-    static std::vector<uintptr_t> NextScan(DWORD pid, const std::vector<uintptr_t>& previousResults, T targetValue) {
-        std::vector<uintptr_t> filtered;
-        HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, pid);
-        if (!hProcess) return filtered;
+    static void NextScanAsyncCallback(
+        DWORD pid,
+        const std::vector<uintptr_t>& input,
+        T targetValue,
+        std::atomic<bool>& abortSignal,
+        std::function<void(std::vector<uintptr_t>)> onComplete)
+    {
 
-        T currentValue;
-        SIZE_T bytesRead;
-        for (uintptr_t addr : previousResults) {
-            if (ReadProcessMemory(hProcess, (LPCVOID)addr, &currentValue, sizeof(T), &bytesRead)) {
-                if (currentValue == targetValue) {
-                    filtered.push_back(addr);
+        std::thread([=, &abortSignal]() {
+            std::vector<uintptr_t> filtered;
+            HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, pid);
+            if (hProcess) {
+                T currentValue;
+                SIZE_T bytesRead;
+
+
+                for (uintptr_t addr : input) {
+
+                    if (abortSignal.load()) {
+                        break;
+                    }
+
+                    if (ReadProcessMemory(hProcess, (LPCVOID)addr, &currentValue, sizeof(T), &bytesRead)) {
+                        if (currentValue == targetValue) {
+                            filtered.push_back(addr);
+                        }
+                    }
                 }
+                CloseHandle(hProcess);
             }
-        }
-        CloseHandle(hProcess);
-        return filtered;
+            onComplete(filtered);
+        }).detach();
     }
 };
 

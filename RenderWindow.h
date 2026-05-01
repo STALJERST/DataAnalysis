@@ -24,6 +24,7 @@
 #define IDC_STATIC_LIST 6009
 #define IDC_TOOLS_COMBO 6010
 #define IDC_BTN_EXECUTE_TOOL 6011
+#define WM_SCAN_FINISHED (WM_USER + 1)
 
 enum ScanDataType {
     TYPE_INT = 0,
@@ -69,6 +70,8 @@ private:
     HWND m_hStaticList;
     HWND m_hSortCombo;
 
+    MemoryEngine engine;
+
     DWORD m_selectedPID = 0;
     ScanDataType m_currentScanType = TYPE_INT;
 
@@ -77,6 +80,8 @@ private:
     std::vector<uintptr_t> m_scanResults;
     std::vector<uintptr_t> m_savedAddresses;
     std::vector<StaticSignature> m_staticItems;
+    std::atomic<bool> m_abortScan{false};
+    std::future<void> m_scanFuture;
 
     void SetupControls();
     void LoadProcesses();

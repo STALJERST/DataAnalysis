@@ -118,7 +118,7 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
         case WM_SIZE: {
             int width = LOWORD(lParam);
             int height = HIWORD(lParam);
-            int sideWidth = std::max(width / 6, 160);
+            int sideWidth = std::max(width / 4, 300);
             int mainX = sideWidth + 10;
             int mainWidth = width - mainX - 10;
 
@@ -238,26 +238,6 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
             }
 
 
-            if (lpnmh->idFrom == IDC_SAVED_LIST && lpnmh->code == LVN_GETDISPINFOW) {
-                NMLVDISPINFOW* pDispInfo = (NMLVDISPINFOW*)lParam;
-                if (pDispInfo->item.mask & LVIF_TEXT) {
-                    int row = pDispInfo->item.iItem;
-                    int col = pDispInfo->item.iSubItem;
-                    if (row >= 0 && row < m_savedAddresses.size()) {
-                        if (col == 0) {
-                            swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"0x%p", (void*)m_savedAddresses[row]);
-                        } else if (col == 1) {
-                            int currentVal = 0;
-                            HANDLE hProc = OpenProcess(PROCESS_VM_READ, FALSE, m_selectedPID);
-                            if (hProc) {
-                                ReadProcessMemory(hProc, (LPCVOID)m_savedAddresses[row], &currentVal, sizeof(int), NULL);
-                                CloseHandle(hProc);
-                            }
-                            swprintf(pDispInfo->item.pszText, pDispInfo->item.cchTextMax, L"%d", currentVal);
-                        }
-                    }
-                }
-            }
 
             if (lpnmh->idFrom == 1001 && lpnmh->code == LVN_GETDISPINFOW) {
                 NMLVDISPINFOW* pDispInfo = (NMLVDISPINFOW*)lParam;
@@ -308,8 +288,7 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
             }
             else if (wmId == IDC_SORT_COMBO && wmEvent == CBN_SELCHANGE) {
                 SortProcesses();
-            }
-            else if (wmId == IDC_SCAN_BUTTON || wmId == IDC_NEXT_SCAN_BUTTON) {
+            }else if (wmId == IDC_SCAN_BUTTON) {
                 if (m_selectedPID == 0) {
                     MessageBoxW(m_hwnd, L"Спочатку виберіть процес!", L"Увага", MB_ICONWARNING);
                     return 0;
@@ -323,23 +302,53 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
                 if (m_currentScanType == TYPE_INT) {
                     int val = _wtoi(buf);
-                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = MemoryEngine::Scan<int>(m_selectedPID, val);
-                    else m_scanResults = MemoryEngine::NextScan<int>(m_selectedPID, m_scanResults, val);
+                    m_scanResults = MemoryEngine::Scan<int>(m_selectedPID, val);
                 }
                 else if (m_currentScanType == TYPE_FLOAT) {
                     float val = (float)_wtof(buf);
-                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = MemoryEngine::Scan<float>(m_selectedPID, val);
-                    else m_scanResults = MemoryEngine::NextScan<float>(m_selectedPID, m_scanResults, val);
+                    m_scanResults = MemoryEngine::Scan<float>(m_selectedPID, val);
                 }
                 else if (m_currentScanType == TYPE_BYTE) {
                     BYTE val = (BYTE)_wtoi(buf);
-                    if (wmId == IDC_SCAN_BUTTON) m_scanResults = MemoryEngine::Scan<BYTE>(m_selectedPID, val);
-                    else m_scanResults = MemoryEngine::NextScan<BYTE>(m_selectedPID, m_scanResults, val);
+                    m_scanResults = MemoryEngine::Scan<BYTE>(m_selectedPID, val);
                 }
 
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 ListView_SetItemCount(m_hResultsList, m_scanResults.size());
                 InvalidateRect(m_hResultsList, NULL, TRUE);
+            }
+            else if (wmId == IDC_NEXT_SCAN_BUTTON) {
+                if (m_selectedPID == 0) {
+                    MessageBoxW(m_hwnd, L"Спочатку виберіть процес!", L"Увага", MB_ICONWARNING);
+                    return 0;
+                }
+
+                wchar_t buf[32];
+                GetWindowTextW(m_hScanEdit, buf, 32);
+                m_currentScanType = (ScanDataType)SendMessageW(m_hTypeCombo, CB_GETCURSEL, 0, 0);
+                int val = _wtoi(buf);
+                SetCursor(LoadCursor(NULL, IDC_WAIT));
+
+                m_abortScan = false;
+
+
+                EnableWindow(m_hNextScanBtn, FALSE);
+                SetWindowTextW(m_hPidLabel, L"Сканування... (Можна скасувати)");
+
+                MemoryEngine::NextScanAsyncCallback<int>(
+                    m_selectedPID,
+                    m_scanResults,
+                    val,
+                    m_abortScan,
+
+
+                    [this](std::vector<uintptr_t> result) {
+
+                        m_scanResults = result;
+
+                        PostMessageW(m_hwnd, WM_SCAN_FINISHED, 0, 0);
+                    }
+                );
             }
             else if (wmId == IDC_BTN_EXECUTE_TOOL) {
                 int selectedTool = SendMessageW(m_hToolsCombo, CB_GETCURSEL, 0, 0);
@@ -400,6 +409,22 @@ int main() {
             return 0;
         }
         case WM_DESTROY: PostQuitMessage(0); return 0;
+
+
+        case WM_SCAN_FINISHED: {
+            // Вмикаємо кнопку назад
+            EnableWindow(m_hNextScanBtn, TRUE);
+            UpdatePidLabel(); // Повертаємо нормальний текст
+
+            // Оновлюємо список на екрані
+            ListView_SetItemCount(m_hResultsList, m_scanResults.size());
+            InvalidateRect(m_hResultsList, NULL, TRUE);
+
+            if (m_abortScan.load()) {
+                MessageBoxW(m_hwnd, L"Сканування було перервано користувачем!", L"Скасовано", MB_OK);
+            }
+            return 0;
+        }
     }
     return DefWindowProc(m_hwnd, uMsg, wParam, lParam);
 }
@@ -570,7 +595,7 @@ void RenderWindow::SortProcesses() {
             ta.LowPart = a.creationTime.dwLowDateTime; ta.HighPart = a.creationTime.dwHighDateTime;
             tb.LowPart = b.creationTime.dwLowDateTime; tb.HighPart = b.creationTime.dwHighDateTime;
 
-            if (ta.QuadPart == 0) return false; // Ховаємо процеси без доступу вниз
+            if (ta.QuadPart == 0) return false;
             if (tb.QuadPart == 0) return true;
             return ta.QuadPart < tb.QuadPart;
         }
