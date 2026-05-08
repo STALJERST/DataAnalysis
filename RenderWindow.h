@@ -25,6 +25,9 @@
 #define IDC_TOOLS_COMBO 6010
 #define IDC_BTN_EXECUTE_TOOL 6011
 #define WM_SCAN_FINISHED (WM_USER + 1)
+#define IDC_SIG_NAME_EDIT 6012
+#define IDC_SIG_AOB_EDIT  6013
+#define IDC_BTN_ADD_SIG   6014
 
 enum ScanDataType {
     TYPE_INT = 0,
@@ -41,10 +44,11 @@ struct DataItem {
 };
 
 struct StaticSignature {
-    std::wstring name;
-    std::string pattern;
-    std::string mask;
-    uintptr_t resolvedAddress;
+    std::wstring name;           // Назва (наприклад, "Гроші гравця")
+    std::string originalAOB;     // Зрозумілий текст: "89 45 FC ? ?"
+    std::string pattern;         // Сирі байти для пам'яті
+    std::string mask;            // Маска ("xxx??")
+    uintptr_t resolvedAddress;   // Знайдена адреса
 };
 
 class RenderWindow {
@@ -69,6 +73,9 @@ private:
     HWND m_hExecuteToolBtn;
     HWND m_hStaticList;
     HWND m_hSortCombo;
+    HWND m_hSigNameEdit;
+    HWND m_hSigAobEdit;
+    HWND m_hAddSigBtn;
 
     MemoryEngine engine;
 
@@ -89,6 +96,9 @@ private:
     void UpdatePidLabel();
     void ShowMemoryDump(uintptr_t address);
     void SortProcesses();
+    void ParseAOB(const std::string& input, std::string& pattern, std::string& mask);
+    void SaveSignatures();
+    void LoadSignatures();
 
     static LRESULT CALLBACK StaticWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK MemoryDumpProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);

@@ -7,6 +7,7 @@
 #include <tlhelp32.h>
 #include <atomic>
 #include <future>
+#include <locale>
 
 class MemoryEngine {
 public:
