@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 4.1)
-project(dataAnalis)
+project(dataAnalysis)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(dataAnalis
+add_executable(dataAnalysis
         window.cpp
+        RenderWindow.cpp
+        RenderWindow.h
 )
-<<<<<<< HEAD
-target_link_libraries(dataAnalis comctl32)
-=======
->>>>>>> f2147a070bd9842b53ea9df3b46514e5c54837fe
+
+target_link_libraries(dataAnalysis comctl32)
+
+
