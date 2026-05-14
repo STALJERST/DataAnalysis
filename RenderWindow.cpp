@@ -7,6 +7,7 @@
 #include <sstream>
 #include <iomanip>
 
+
 RenderWindow::RenderWindow() {
     m_hwnd = NULL;
     m_hListView = NULL;
@@ -63,7 +64,6 @@ std::wstring SimpleDisassembler(const std::vector<BYTE>& buffer, SIZE_T bytesRea
              }
         }
         else {
-            // Якщо інструкція невідома нашому міні-дизасемблеру
             ss << std::hex << std::setw(2) << std::setfill(L'0') << (int)opcode << L"           | ???\r\n";
             i += 1;
         }
@@ -126,7 +126,6 @@ void RenderWindow::LoadProcesses() {
                     if (GetProcessTimes(hProc, &ftCreation, &ftExit, &ftKernel, &ftUser)) {
                         item.creationTime = ftCreation;
 
-                        // 1. Форматуємо час запуску (Години:Хвилини:Секунди)
                         SYSTEMTIME stUTC, stLocal;
                         FileTimeToSystemTime(&ftCreation, &stUTC);
                         SystemTimeToTzSpecificLocalTime(NULL, &stUTC, &stLocal);
@@ -135,7 +134,6 @@ void RenderWindow::LoadProcesses() {
                         swprintf(buf, 64, L"%02d:%02d:%02d", stLocal.wHour, stLocal.wMinute, stLocal.wSecond);
                         item.launchTimeStr = buf;
 
-                        // 2. Рахуємо час роботи (Uptime)
                         FILETIME ftNow;
                         GetSystemTimeAsFileTime(&ftNow);
                         ULARGE_INTEGER uCreation, uNow;
@@ -201,9 +199,11 @@ LRESULT RenderWindow::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam) {
             SetWindowPos(m_hScanBtn, NULL, mainX + 250, 30, 140, 25, SWP_NOZORDER);
             SetWindowPos(m_hNextScanBtn, NULL, mainX + 400, 30, 140, 25, SWP_NOZORDER);
 
+            // Списки пам'яті
             SetWindowPos(m_hResultsList, NULL, mainX, topOffset, mainWidth, listHeight, SWP_NOZORDER);
             SetWindowPos(m_hSavedList, NULL, mainX, topOffset + listHeight + 5, mainWidth, listHeight, SWP_NOZORDER);
 
+            // Панель створення сигнатур
             int sigY = topOffset + (listHeight * 2) + 15;
             SetWindowPos(m_hSigNameEdit, NULL, mainX, sigY, 120, 25, SWP_NOZORDER);
             SetWindowPos(m_hSigAobEdit, NULL, mainX + 130, sigY, mainWidth - 240, 25, SWP_NOZORDER);
@@ -514,15 +514,12 @@ int main() {
                     SetCursor(LoadCursor(NULL, IDC_ARROW));
                 }
                 else if (selectedTool == 1) {
-                    // === 2. ЗБЕРЕГТИ ТАБЛИЦЮ У ФАЙЛ ===
                     SaveSignatures();
                 }
                 else if (selectedTool == 2) {
-                    // === 3. ЗАВАНТАЖИТИ ТАБЛИЦЮ ===
                     LoadSignatures();
                 }
                 else if (selectedTool == 3) {
-                    // === 4. ОНОВИТИ ПОСИЛАННЯ (AOB SCAN) ===
                     if (m_selectedPID == 0) return 0;
                     SetCursor(LoadCursor(NULL, IDC_WAIT));
                     for (auto& item : m_staticItems) {
@@ -531,6 +528,16 @@ int main() {
                     SetCursor(LoadCursor(NULL, IDC_ARROW));
                     InvalidateRect(m_hStaticList, NULL, TRUE);
                     MessageBoxW(m_hwnd, L"Посилання оновлено!", L"Успіх", MB_OK);
+                }else if (selectedTool == 4) {
+                    ShowProxyLogs();
+
+                    m_proxyServer.Start([this](const std::wstring& msg) {
+                        std::wstring* safeMsg = new std::wstring(msg + L"\r\n");
+                        PostMessageW(this->getHWND(), WM_LOG_MESSAGE, 0, (LPARAM)safeMsg);
+                    });
+                }
+                else if (selectedTool == 5) {
+                    ShowProxyLogs();
                 }
             }
             return 0;
@@ -539,16 +546,24 @@ int main() {
 
 
         case WM_SCAN_FINISHED: {
-            // Вмикаємо кнопку назад
             EnableWindow(m_hNextScanBtn, TRUE);
-            UpdatePidLabel(); // Повертаємо нормальний текст
+            UpdatePidLabel();
 
-            // Оновлюємо список на екрані
             ListView_SetItemCount(m_hResultsList, m_scanResults.size());
             InvalidateRect(m_hResultsList, NULL, TRUE);
 
             if (m_abortScan.load()) {
                 MessageBoxW(m_hwnd, L"Сканування було перервано користувачем!", L"Скасовано", MB_OK);
+            }
+            return 0;
+        }case WM_LOG_MESSAGE: {
+            std::wstring* msg = (std::wstring*)lParam;
+            if (msg) {
+                m_fullLogHistory += *msg;
+
+                AppendLogText(*msg);
+
+                delete msg;
             }
             return 0;
         }
@@ -557,7 +572,6 @@ int main() {
 }
 
 void RenderWindow::SetupControls() {
-    // 1. ЛІВА ПАНЕЛЬ (Пошук та Сортування)
     m_hSearchCombo = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 0, 0, 0, 150, m_hwnd, (HMENU)IDC_SEARCH_COMBO, NULL, NULL);
     SendMessageW(m_hSearchCombo, CB_ADDSTRING, 0, (LPARAM)L"Шукати по назві");
     SendMessageW(m_hSearchCombo, CB_ADDSTRING, 0, (LPARAM)L"Шукати по PID");
@@ -581,17 +595,17 @@ void RenderWindow::SetupControls() {
     lvc.iSubItem = 2; lvc.cx = 75; lvc.pszText = (LPWSTR)L"Запуск"; SendMessageW(m_hListView, LVM_INSERTCOLUMNW, 2, (LPARAM)&lvc);
     lvc.iSubItem = 3; lvc.cx = 90; lvc.pszText = (LPWSTR)L"Робота"; SendMessageW(m_hListView, LVM_INSERTCOLUMNW, 3, (LPARAM)&lvc);
 
-    // 2. ІНСТРУМЕНТИ
     m_hToolsCombo = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 0, 0, 0, 150, m_hwnd, (HMENU)IDC_TOOLS_COMBO, NULL, NULL);
-    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Запустити манекен");
-    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Зберегти таблицю");
-    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Завантажити таблицю");
-    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Оновити посилання");
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Запустити манекен");      // Індекс 0
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Зберегти таблицю");       // Індекс 1
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Завантажити таблицю");    // Індекс 2
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Оновити посилання");      // Індекс 3
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Запустити API Proxy");    // Індекс 4
+    SendMessageW(m_hToolsCombo, CB_ADDSTRING, 0, (LPARAM)L"Показати логи запитів");  // Індекс 5
     SendMessageW(m_hToolsCombo, CB_SETCURSEL, 0, 0);
 
     m_hExecuteToolBtn = CreateWindowExW(0, L"BUTTON", L"Виконати", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_EXECUTE_TOOL, NULL, NULL);
 
-    // 3. ПРАВА ПАНЕЛЬ (Сканування)
     m_hPidLabel = CreateWindowExW(0, L"STATIC", L"Вибраний процес (PID): Немає", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_PID_LABEL, NULL, NULL);
     m_hScanEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"100", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_SCAN_EDIT, NULL, NULL);
 
@@ -604,7 +618,6 @@ void RenderWindow::SetupControls() {
     m_hScanBtn = CreateWindowExW(0, L"BUTTON", L"Перше сканування", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_SCAN_BUTTON, NULL, NULL);
     m_hNextScanBtn = CreateWindowExW(0, L"BUTTON", L"Відсіяти (Next)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_NEXT_SCAN_BUTTON, NULL, NULL);
 
-    // 4. СПИСКИ ПАМ'ЯТІ
     m_hResultsList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_OWNERDATA, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_RESULTS_LIST, NULL, NULL);
     ListView_SetExtendedListViewStyle(m_hResultsList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
     LVCOLUMNW lvc1 = {0}; lvc1.mask = LVCF_FMT | LVCF_WIDTH | LVCF_TEXT; lvc1.fmt = LVCFMT_LEFT;
@@ -617,7 +630,6 @@ void RenderWindow::SetupControls() {
     lvcSaved.cx = 140; lvcSaved.pszText = (LPWSTR)L"Збережена Адреса"; SendMessageW(m_hSavedList, LVM_INSERTCOLUMNW, 0, (LPARAM)&lvcSaved);
     lvcSaved.cx = 100; lvcSaved.pszText = (LPWSTR)L"Поточне Значення"; SendMessageW(m_hSavedList, LVM_INSERTCOLUMNW, 1, (LPARAM)&lvcSaved);
 
-    // 5. ДОДАВАННЯ СИГНАТУР
     m_hSigNameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"Моє здоров'я", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_SIG_NAME_EDIT, NULL, NULL);
     m_hSigAobEdit = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"89 45 FC ? ? 00", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_SIG_AOB_EDIT, NULL, NULL);
     m_hAddSigBtn = CreateWindowExW(0, L"BUTTON", L"➕ Додати", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_ADD_SIG, NULL, NULL);
@@ -709,7 +721,6 @@ LRESULT CALLBACK RenderWindow::MemoryDumpProc(HWND hwnd, UINT uMsg, WPARAM wPara
 void RenderWindow::SortProcesses() {
     int sortMode = SendMessageW(m_hSortCombo, CB_GETCURSEL, 0, 0);
 
-    // Використовуємо лямбда-функцію для кастомного сортування
     std::sort(m_filteredData.begin(), m_filteredData.end(), [sortMode](const DataItem& a, const DataItem& b) {
         if (sortMode == 0) {
             // За алфавітом
@@ -761,13 +772,12 @@ void RenderWindow::ParseAOB(const std::string& input, std::string& pattern, std:
 void RenderWindow::SaveSignatures() {
     std::wofstream outFile("signatures.txt");
 
-    // ВАЖЛИВО: Вмикаємо підтримку кирилиці для файлу!
+
     outFile.imbue(std::locale(""));
 
     if (!outFile.is_open()) return;
 
     for (const auto& item : m_staticItems) {
-        // Записуємо Назва|AOB
         outFile << item.name << L"|" << std::wstring(item.originalAOB.begin(), item.originalAOB.end()) << L"\n";
     }
     outFile.close();
@@ -777,7 +787,6 @@ void RenderWindow::SaveSignatures() {
 void RenderWindow::LoadSignatures() {
     std::wifstream inFile("signatures.txt");
 
-    // ВАЖЛИВО: Читаємо файл також з підтримкою кирилиці!
     inFile.imbue(std::locale(""));
 
     if (!inFile.is_open()) {
@@ -785,7 +794,7 @@ void RenderWindow::LoadSignatures() {
         return;
     }
 
-    m_staticItems.clear(); // Очищаємо список перед завантаженням
+    m_staticItems.clear();
     std::wstring line;
 
     while (std::getline(inFile, line)) {
@@ -808,4 +817,60 @@ void RenderWindow::LoadSignatures() {
     ListView_SetItemCount(m_hStaticList, m_staticItems.size());
     InvalidateRect(m_hStaticList, NULL, TRUE);
     MessageBoxW(m_hwnd, L"Таблицю сигнатур завантажено! Тепер натисніть 'Оновити посилання'.", L"Завантаження", MB_OK);
+}
+
+
+void RenderWindow::ShowProxyLogs() {
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = LogWindowProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = L"ProxyLogClass";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    RegisterClassW(&wc);
+
+    CreateWindowExW(0, L"ProxyLogClass", L"API Proxy Монітор",
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    CW_USEDEFAULT, CW_USEDEFAULT, 600, 400,
+                    m_hwnd, NULL, GetModuleHandle(NULL), this);
+}
+
+void RenderWindow::AppendLogText(const std::wstring& text) {
+    if (!m_hLogEdit) return;
+    int len = GetWindowTextLengthW(m_hLogEdit);
+    SendMessageW(m_hLogEdit, EM_SETSEL, len, len);
+    SendMessageW(m_hLogEdit, EM_REPLACESEL, 0, (LPARAM)text.c_str());
+}
+
+LRESULT CALLBACK RenderWindow::LogWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    RenderWindow* pThis = nullptr;
+
+    if (uMsg == WM_NCCREATE) {
+        CREATESTRUCT* pCreate = (CREATESTRUCT*)lParam;
+        pThis = (RenderWindow*)pCreate->lpCreateParams;
+        SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pThis);
+    } else {
+        pThis = (RenderWindow*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    }
+
+    switch (uMsg) {
+        case WM_CREATE: {
+            pThis->m_hLogEdit = CreateWindowExW(0, L"EDIT", pThis->m_fullLogHistory.c_str(),
+                WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+                0, 0, 0, 0, hwnd, NULL, NULL, NULL);
+
+            HFONT hFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+            SendMessageW(pThis->m_hLogEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+            return 0;
+        }
+        case WM_SIZE:
+            if (pThis && pThis->m_hLogEdit) {
+                SetWindowPos(pThis->m_hLogEdit, NULL, 0, 0, LOWORD(lParam), HIWORD(lParam), SWP_NOZORDER);
+            }
+            return 0;
+        case WM_DESTROY:
+            if (pThis) pThis->m_hLogEdit = NULL;
+            return 0;
+    }
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }

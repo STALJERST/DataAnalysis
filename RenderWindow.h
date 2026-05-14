@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "MemoryEngine.h"
+#include "proxy/ProxyServer.h"
 
 #define IDM_READ_MEM 4001
 #define IDM_WRITE_MEM 4002
@@ -28,7 +29,7 @@
 #define IDC_SIG_NAME_EDIT 6012
 #define IDC_SIG_AOB_EDIT  6013
 #define IDC_BTN_ADD_SIG   6014
-
+#define WM_LOG_MESSAGE (WM_USER + 2)
 enum ScanDataType {
     TYPE_INT = 0,
     TYPE_FLOAT = 1,
@@ -76,7 +77,9 @@ private:
     HWND m_hSigNameEdit;
     HWND m_hSigAobEdit;
     HWND m_hAddSigBtn;
+    HWND m_hLogEdit;
 
+    ProxyServer m_proxyServer;
     MemoryEngine engine;
 
     DWORD m_selectedPID = 0;
@@ -90,6 +93,7 @@ private:
     std::atomic<bool> m_abortScan{false};
     std::future<void> m_scanFuture;
 
+    void AppendLogText(const std::wstring& text);
     void SetupControls();
     void LoadProcesses();
     void FilterData();
@@ -99,9 +103,13 @@ private:
     void ParseAOB(const std::string& input, std::string& pattern, std::string& mask);
     void SaveSignatures();
     void LoadSignatures();
+    void ShowProxyLogs();
+
 
     static LRESULT CALLBACK StaticWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK MemoryDumpProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK LogWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    std::wstring m_fullLogHistory = L"=== Система перехоплення API готова ===\r\n";
     LRESULT HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam);
 
     struct DumpContext {
